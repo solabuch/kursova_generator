@@ -1,0 +1,6 @@
+# requirements.txt
+PyYAML>=5.4 # Для читання config.yaml
+openai>=1.0  # Для OpenAI API (замініть або додайте бібліотеки для інших провайдерів)
+# google-generativeai # Для Google Gemini API
+# anthropic # Для Anthropic Claude API
+python-dotenv # Якщо ви вирішите зберігати ключі в .env файлі

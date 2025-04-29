@@ -1,0 +1,25 @@
+# config.yaml
+active_provider: openai # або gemini, anthropic тощо - який провайдер використовувати
+
+providers:
+  openai:
+    api_key: "" # Замініть на свій ключ або використовуйте змінні середовища
+    model: "gpt-4.1-mini" # або gpt-3.5-turbo, gpt-4-turbo тощо
+    # Додаткові параметри для OpenAI (temperature, max_tokens etc.)
+    generation_params:
+      temperature: 0.7
+      max_tokens: 10000 # Збільште за потреби
+
+
+project_settings:
+  input_toc_file: "input/toc.txt"
+  output_dir: "output/"
+  prompt_template_file: "prompts/section_prompt.txt"
+  # Загальна інформація про курсову - можна задати тут або передавати аргументами
+  topic: "Порівняльна характеристика асортименту та якості чаю та кави вітчизняного та закордонного виробництва"
+  methodology_summary: |
+    - Дотримуватись академічного стилю.
+    - Обсяг роботи: 30-40 сторінок.
+    - Обов'язково посилання на джерела.
+    - Структура: Вступ, 2-3 Розділи, Висновки, Список літератури.
+    # Додайте ключові тези з ваших методичних рекомендацій
