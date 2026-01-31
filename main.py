@@ -1,14 +1,20 @@
+
 # main.py
 import yaml
 import importlib
 import logging
 import os
 import argparse
-from typing import List, Dict
+from typing import List, Dict, Callable, Optional
+from dotenv import load_dotenv
+
+# Завантажуємо змінні середовища з .env файлу
+load_dotenv()
 
 # Імпортуємо потрібні модулі з нашого проєкту
-from core.toc_parser import parse_toc
+from core.toc_parser import parse_toc, parse_lines
 from core.file_handler import save_content, sanitize_filename
+from core.orchestrator import Orchestrator 
 from ai_providers.base_provider import BaseAIProvider
 
 # Налаштування логування
@@ -32,18 +38,6 @@ def load_config(config_path='config.yaml'):
          logger.error(f"Загальна помилка при завантаженні конфігурації: {e}")
          raise
 
-def load_prompt_template(filepath: str) -> str:
-    """Завантажує шаблон промпту з файлу."""
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return f.read()
-    except FileNotFoundError:
-        logger.error(f"Файл шаблону промпту не знайдено: {filepath}")
-        raise
-    except Exception as e:
-        logger.error(f"Помилка читання файлу шаблону промпту {filepath}: {e}")
-        raise
-
 def get_ai_provider(config: dict) -> BaseAIProvider:
     """Створює екземпляр відповідного AI провайдера на основі конфігурації."""
     provider_name = config.get('active_provider')
@@ -56,225 +50,286 @@ def get_ai_provider(config: dict) -> BaseAIProvider:
 
     api_key = provider_config.get('api_key')
     model = provider_config.get('model')
-    config_params = provider_config # Передаємо всі параметри провайдера
+    config_params = provider_config 
 
     if not api_key:
-         # Спробувати завантажити з змінної середовища, якщо не задано явно
-         api_key_env_var = f"{provider_name.upper()}_API_KEY" # e.g., OPENAI_API_KEY
+         api_key_env_var = f"{provider_name.upper()}_API_KEY" 
          api_key = os.environ.get(api_key_env_var)
-         logger.info(f"Завантажено API ключ для {provider_name} зі змінної середовища {api_key_env_var}")
          if not api_key:
               logger.warning(f"API ключ для {provider_name} не знайдено ні в config.yaml, ні в змінній середовища {api_key_env_var}.")
-              # Можна або викликати помилку, або продовжити (деякі API можуть працювати без ключа з обмеженнями)
-              # raise ValueError(f"API ключ для {provider_name} не знайдено.")
-
 
     if not model:
         raise ValueError(f"Не вказано 'model' для провайдера '{provider_name}' у конфігурації.")
 
     try:
-        # Динамічно імпортуємо модуль провайдера
         module_path = f"ai_providers.{provider_name}_provider"
         provider_module = importlib.import_module(module_path)
-
-        # Отримуємо клас провайдера (очікуємо назву типу OpenAIProvider, GeminiProvider)
         class_name = f"{provider_name.capitalize()}Provider"
         ProviderClass = getattr(provider_module, class_name)
-
-        # Створюємо екземпляр класу
         instance = ProviderClass(api_key=api_key, model=model, config_params=config_params)
         logger.info(f"Створено екземпляр AI провайдера: {class_name} з моделлю {model}")
         return instance
 
-    except ModuleNotFoundError:
-        logger.error(f"Модуль провайдера не знайдено: {module_path}.py")
-        raise ImportError(f"Перевірте наявність файлу {module_path}.py")
-    except AttributeError:
-        logger.error(f"Клас провайдера '{class_name}' не знайдено у модулі {module_path}.py")
-        raise ImportError(f"Перевірте назву класу в {module_path}.py")
     except Exception as e:
          logger.error(f"Помилка при створенні AI провайдера {provider_name}: {e}")
          raise
 
 def combine_output_files(output_dir: str, final_filename: str, structure: list[dict], topic: str):
     """
-    Об'єднує згенеровані файли в один фінальний файл
-    відповідно до порядку в структурі змісту.
+    Об'єднує згенеровані файли в один фінальний файл.
+    Джерела сортуються за алфавітом, посилання перенумеровуються відповідно.
     """
+    import re
+    
     final_filepath = os.path.join(output_dir, final_filename)
+    sources_filepath = os.path.join(output_dir, "_sources.txt")
     logger.info(f"Початок об'єднання файлів у: {final_filepath}")
 
+    source_block_re = re.compile(r'\[\[SOURCE_LIST\]\](.*?)\[\[/SOURCE_LIST\]\]', re.DOTALL)
+    citation_re = re.compile(r'\[(\d+)\]')
+
+    # ===== PASS 1: Збираємо всі джерела та контент =====
+    all_sources_set = set()  # Унікальні джерела
+    sections_data = []       # Список: {'header': str, 'content': str, 'local_sources': list}
+
+    for item in structure:
+        number_part = str(item.get('number', 'unknown')).replace('.', '_').replace(' ', '_')
+        filename_base = sanitize_filename(item.get('title', 'untitled'))
+        individual_filename = f"level{item.get('level', 0)}_{number_part}_{filename_base}.txt"
+        individual_filepath = os.path.join(output_dir, individual_filename)
+
+        # ЗАГОЛОВОК
+        level = item.get('level', 0)
+        number = item.get('number')
+        title = item.get('title', 'Без назви')
+
+        if number:
+            if level == 0:
+                clean_num = str(number).lower().replace('розділ', '').strip()
+                if clean_num and clean_num[0].isdigit():
+                    # Формат: "Розділ 1 НАЗВА" (Розділ з великої, назва капсом)
+                    header_title = f"Розділ {clean_num} {title.upper()}"
+                else:
+                    if title.upper() in ["ВСТУП", "ВИСНОВКИ", "РЕЗЮМЕ"]:
+                        header_title = title.upper()
+                    else:
+                        header_title = f"{number} {title.upper()}"
+            else:
+                header_title = f"{number} {title}"
+        else:
+            header_title = title.upper()
+        
+        # Пропускаємо секцію джерел
+        if "список використаних джерел" in header_title.lower() or "список літератури" in header_title.lower():
+            continue
+
+        section_entry = {'header': header_title, 'content': '', 'local_sources': []}
+
+        if os.path.exists(individual_filepath):
+            try:
+                with open(individual_filepath, 'r', encoding='utf-8') as infile:
+                    content = infile.read()
+                
+                # Функція нормалізації джерел (видаляє зайві пробіли, уніфікує формат)
+                def normalize_source(s: str) -> str:
+                    # Видаляємо подвійні пробіли
+                    s = re.sub(r'\s+', ' ', s.strip())
+                    # Видаляємо пробіли перед крапками/комами
+                    s = re.sub(r'\s+([.,;:])', r'\1', s)
+                    # Уніфікуємо тире
+                    s = s.replace(' - ', ' – ').replace('—', '–')
+                    return s
+                
+                # Витягуємо локальні джерела
+                local_sources = []
+                match = source_block_re.search(content)
+                if match:
+                    raw_sources = match.group(1).strip().split('\n')
+                    content = source_block_re.sub('', content).strip()
+                    
+                    for s in raw_sources:
+                        clean_s = re.sub(r'^\d+\.\s*', '', s.strip())
+                        if clean_s:
+                            # Нормалізуємо джерело
+                            normalized = normalize_source(clean_s)
+                            local_sources.append(normalized)
+                            all_sources_set.add(normalized)
+
+                # Видаляємо дублюючий заголовок на початку контенту (AI часто дублює)
+                # Шукаємо рядки типу "Розділ 1. Назва" або "1.1 Назва" на початку
+                lines = content.split('\n')
+                if lines:
+                    first_line = lines[0].strip().lower()
+                    # Якщо перший рядок схожий на заголовок - видаляємо
+                    if (first_line.startswith('розділ') or 
+                        re.match(r'^\d+\.\d*\s', first_line) or
+                        title.lower() in first_line):
+                        lines = lines[1:]  # Пропускаємо перший рядок
+                        # Видаляємо порожні рядки на початку
+                        while lines and not lines[0].strip():
+                            lines = lines[1:]
+                    content = '\n'.join(lines)
+
+                # Форматування
+                content = re.sub(r'\n{3,}', '\n\n', content)
+                content = content.replace('\n\n', '\n')
+
+                section_entry['content'] = content
+                section_entry['local_sources'] = local_sources
+
+            except IOError as e:
+                section_entry['content'] = f"[Помилка читання файлу: {e}]"
+        else:
+            section_entry['content'] = "[Файл ще не згенеровано або не знайдено]"
+
+        sections_data.append(section_entry)
+
+    # ===== PASS 2: Сортуємо джерела за алфавітом =====
+    sorted_sources = sorted(all_sources_set, key=lambda x: x.lower())
+    # Створюємо мапу: текст_джерела -> фінальний номер (1-based)
+    source_to_final_id = {src: idx + 1 for idx, src in enumerate(sorted_sources)}
+
+    # ===== PASS 3: Заміна цитат та запис файлу =====
     try:
         with open(final_filepath, 'w', encoding='utf-8') as final_file:
-            # Додаємо заголовок роботи
             final_file.write(f"КУРСОВА РОБОТА\n")
             final_file.write(f"Тема: {topic}\n")
-            final_file.write("=" * 80 + "\n\n") # Роздільник
+            final_file.write("=" * 80 + "\n\n")
 
-            # Проходимо по структурі змісту для правильного порядку
-            for item in structure:
-                # --- Реконструкція імені файлу (має бути ідентичною до логіки в save_content) ---
-                number_part = str(item.get('number', 'unknown')).replace('.', '_').replace(' ', '_')
-                # Використовуємо ТІЛЬКИ назву для імені файлу, щоб уникнути проблем з довгими 'full_title'
-                filename_base = sanitize_filename(item.get('title', 'untitled'))
-                individual_filename = f"level{item.get('level', 0)}_{number_part}_{filename_base}.txt"
-                individual_filepath = os.path.join(output_dir, individual_filename)
-                # --- Кінець реконструкції ---
+            for section in sections_data:
+                final_file.write(f"{section['header']}\n\n")
 
-                logger.debug(f"Додавання файлу: {individual_filepath}")
+                content = section['content']
+                local_sources = section['local_sources']
 
-                # Додаємо заголовок розділу/підрозділу в фінальний файл
-                final_file.write(f"--- {item.get('full_title', 'НЕВІДОМИЙ РОЗДІЛ')} ---\n\n")
+                if local_sources:
+                    # Створюємо мапу: локальний номер -> фінальний номер
+                    local_to_final = {}
+                    for i, src_text in enumerate(local_sources):
+                        local_idx = str(i + 1)
+                        final_idx = source_to_final_id.get(src_text, i + 1)
+                        local_to_final[local_idx] = str(final_idx)
 
-                if os.path.exists(individual_filepath):
-                    try:
-                        with open(individual_filepath, 'r', encoding='utf-8') as infile:
-                            content = infile.read()
-                        # Записуємо вміст файлу
-                        final_file.write(content) 
-                        # Додаємо роздільник між частинами
-                        final_file.write("\n\n" + "=" * 80 + "\n\n")
-                    except IOError as e:
-                        logger.warning(f"Не вдалося прочитати файл {individual_filepath}: {e}")
-                        final_file.write(f"[Помилка: Не вдалося завантажити вміст з файлу {individual_filename}]\n\n")
-                        final_file.write("\n\n" + "=" * 80 + "\n\n") # Додаємо роздільник навіть якщо помилка
-                else:
-                    logger.warning(f"Файл не знайдено для об'єднання: {individual_filepath}")
-                    final_file.write(f"[Помилка: Файл {individual_filename} не знайдено]\n\n")
-                    final_file.write("\n\n" + "=" * 80 + "\n\n") # Додаємо роздільник
+                    # Заміна цитат
+                    def replace_citation(m):
+                        old_num = m.group(1)
+                        return f"[{local_to_final.get(old_num, old_num)}]"
+                    
+                    content = citation_re.sub(replace_citation, content)
+
+                final_file.write(content)
+                final_file.write("\n\n")
+
+            # Список джерел (вже відсортований за алфавітом)
+            if sorted_sources:
+                final_file.write("СПИСОК ВИКОРИСТАНИХ ДЖЕРЕЛ\n\n")
+                for i, src in enumerate(sorted_sources, 1):
+                    final_file.write(f"{i}. {src}\n")
+
+        # Окремий файл з джерелами
+        if sorted_sources:
+            with open(sources_filepath, 'w', encoding='utf-8') as f:
+                f.write("СПИСОК ВИКОРИСТАНИХ ДЖЕРЕЛ\n\n")
+                for i, src in enumerate(sorted_sources, 1):
+                    f.write(f"{i}. {src}\n")
+            logger.info(f"Список джерел (за алфавітом) збережено: {sources_filepath}")
 
         logger.info(f"Усі частини успішно об'єднано у файл: {final_filepath}")
+        return final_filepath
 
-    except IOError as e:
-        logger.error(f"Помилка запису у фінальний файл {final_filepath}: {e}")
     except Exception as e:
-        logger.error(f"Неочікувана помилка під час об'єднання файлів: {e}", exc_info=True)
+        logger.error(f"Помилка запису у фінальний файл: {e}")
+        return None
+
+class CourseworkGenerator:
+    def __init__(self, config: dict, log_callback: Optional[Callable[[str], None]] = None):
+        self.config = config
+        self.log_callback = log_callback
+        self.ai_provider = get_ai_provider(self.config)
+        self.orchestrator = Orchestrator(self.ai_provider, self.config)
+
+    def log(self, message: str):
+        logger.info(message)
+        if self.log_callback:
+            self.log_callback(message)
+
+    def run(self, topic: str, toc_text: str = None, input_toc_file: str = None, output_filename: str = '_final_course_paper.txt', overrides: Dict[str, str] = None) -> str:
+        """
+        Запускає процес генерації.
+        :param topic: Тема курсової.
+        :param toc_text: Текст змісту.
+        :param overrides: Словник ручних налаштувань методів.
+        """
+        try:
+            self.config['project_settings']['topic'] = topic
+            output_dir = self.config['project_settings'].get('output_dir', 'output/')
+            output_dir = f"{output_dir}{sanitize_filename(topic)}"
+            
+            if not os.path.exists(output_dir):
+                 os.makedirs(output_dir)
+                 self.log(f"Створено папку для результатів: {output_dir}")
+
+            # 3. Розбір змісту
+            if toc_text:
+                # Використовуємо parse_lines напряму
+                lines = toc_text.splitlines()
+                toc_structure = parse_lines(lines)
+            elif input_toc_file:
+                toc_structure = parse_toc(input_toc_file)
+            else:
+                raise ValueError("Не вказано ні toc_text, ні input_toc_file")
+
+            # 4. ПЛАНУВАННЯ
+            self.log("--- ФАЗА 1: ПЛАНУВАННЯ ---")
+            generation_plan = self.orchestrator.create_plan(toc_structure, overrides=overrides)
+            
+            # 5. ВИКОНАННЯ
+            self.log("--- ФАЗА 2: ВИКОНАННЯ ---")
+            self.orchestrator.execute_plan(generation_plan, output_dir)
+            
+            # 6. Об'єднання
+            final_path = combine_output_files(output_dir, output_filename, generation_plan, topic)
+
+            self.log("Роботу успішно завершено!")
+            return final_path
+
+        except Exception as e:
+            self.log(f"Критична помилка виконання: {e}")
+            logger.error(f"Критична помилка виконання: {e}", exc_info=True)
+            raise e
 
 def main():
-    parser = argparse.ArgumentParser(description="Генератор курсових робіт за допомогою AI з підтримкою контексту.")
-    # ... (аргументи залишаються ті ж самі) ...
+    parser = argparse.ArgumentParser(description="Генератор курсових робіт 2.0 (Агентна система)")
     parser.add_argument('--config', default='config.yaml', help='Шлях до файлу конфігурації.')
-    parser.add_argument('--topic', help='Тема курсової роботи (перевизначає значення з config).')
-    parser.add_argument('--output-file', default='_final_course_paper.txt', help='Назва фінального об\'єднаного файлу.')
+    parser.add_argument('--topic', help='Тема курсової роботи.')
+    parser.add_argument('--output-file', default='_final_course_paper.txt', help='Назва фінального файлу.')
+    parser.add_argument('--dry-run', action='store_true', help='Запуск без реальних викликів AI (тестовий режим).')
 
     args = parser.parse_args()
 
-    # Ініціалізуємо змінну для історії ПЕРЕД блоком try
-    conversation_history: List[Dict[str, str]] = []
-
     try:
-        # 1. Завантаження конфігурації
         config = load_config(args.config)
-        project_settings = config.get('project_settings', {})
-
-        # ... (визначення теми, шляхів, перевірка output_dir) ...
-        topic = args.topic or project_settings.get('topic', 'Не вказана тема')
-        methodology = project_settings.get('methodology_summary', 'Загальні академічні вимоги.')
-        input_toc_file = project_settings.get('input_toc_file', 'input/toc.txt')
-        output_dir = project_settings.get('output_dir', 'output/')
-        output_dir = f"{output_dir}{sanitize_filename(topic)}" # Додаємо назву теми до шляху
-        prompt_template_file = project_settings.get('prompt_template_file', 'prompts/section_prompt.txt')
-        project_topic_area = "Туризм та готельно-ресторанний бізнес"
-
-        if not os.path.exists(output_dir):
-             os.makedirs(output_dir)
-             logger.info(f"Створено папку для результатів: {output_dir}")
-
-        # 2. Завантаження шаблону промпту
-        prompt_template = load_prompt_template(prompt_template_file)
-
-        # 3. Ініціалізація AI провайдера
-        ai_provider = get_ai_provider(config)
-
-        # 4. Розбір файлу змісту
-        toc_structure = parse_toc(input_toc_file)
-
-        # <<< Ініціалізація історії розмови >>>
-        # Можна додати початкове системне повідомлення, якщо потрібно
-        # conversation_history = [
-        #     {"role": "system", "content": f"Ти пишеш курсову роботу на тему '{topic}'. Дотримуйся академічного стилю та вимог: {methodology}"}
-        # ]
-        conversation_history = [] # Починаємо з порожньої історії
-
-        # 5. Генерація контенту для кожного пункту змісту ЗІ ЗБЕРЕЖЕННЯМ ІСТОРІЇ
-        logger.info("Початок генерації контенту для курсової (з контекстом)...")
-        generation_successful = True
-        for item in toc_structure:
-            logger.info(f"--- Генерація для: {item['full_title']} (Рівень: {item['level']}) ---")
-
-            # Формуємо поточний промпт для цього пункту
-            level_info = f"Рівень {item['level']}"
-            # Зверніть увагу: сам шаблон промпту може НЕ потребувати змін,
-            # бо контекст буде передаватись через історію.
-            # Але можна додати фразу типу "Продовжуючи попереднє обговорення..."
-            current_user_prompt = prompt_template.format(
-                project_topic_area=project_topic_area,
-                project_topic=topic,
-                section_title=item['full_title'],
-                section_level_info=level_info,
-                methodology=methodology
-            )
-            # Додаємо інструкцію про контекст (опціонально, модель має зрозуміти з історії)
-            current_user_prompt += "\n\nВраховуй попередньо написаний текст при генерації цієї частини для забезпечення логічного зв'язку та уникнення повторів."
-
-
-            # <<< УВАГА: Потенційна проблема ліміту контекстного вікна >>>
-            # Перед викликом API варто перевірити загальну довжину історії + нового промпту.
-            # Якщо вона наближається до ліміту моделі, потрібно застосувати стратегію:
-            # 1. Обрізка старих повідомлень (найпростіше, але втрачається ранній контекст).
-            # 2. Сумаризація старих частин (складніше).
-            # Поки що реалізуємо без обрізки, покладаючись на велике вікно сучасних моделей,
-            # але додамо попередження.
-            # Для підрахунку токенів потрібна бібліотека tiktoken для OpenAI
-            # try:
-            #     import tiktoken
-            #     encoding = tiktoken.encoding_for_model(ai_provider.model) # Може викинути помилку, якщо модель невідома tiktoken
-            #     num_tokens = len(encoding.encode(str(conversation_history) + current_user_prompt)) # Дуже приблизно! Точніше рахувати для кожного повідомлення.
-            #     logger.info(f"Приблизна кількість токенів у поточному запиті: {num_tokens}")
-            #     # Порівняти num_tokens з лімітом моделі мінус max_tokens для відповіді
-            # except ImportError:
-            #     logger.warning("Бібліотека tiktoken не встановлена. Неможливо точно оцінити розмір контексту.")
-            # except Exception as e:
-            #      logger.warning(f"Не вдалося оцінити розмір контексту за допомогою tiktoken: {e}")
-
-            # <<< Виклик AI провайдера з історією >>>
-            try:
-                generated_content = ai_provider.generate_text(
-                    current_prompt=current_user_prompt,
-                    history=conversation_history # Передаємо всю поточну історію
-                )
-
-                # <<< Оновлення історії розмови >>>
-                conversation_history.append({"role": "assistant", "content": generated_content})
-
-                # Зберігаємо результат поточного кроку
-                save_content(output_dir, item, generated_content.replace('\n\n', '\n'))
-                logger.info(f"--- Завершено для: {item['full_title']} ---")
-
-            except Exception as e:
-                 logger.error(f"Помилка під час генерації або збереження для '{item['full_title']}': {e}", exc_info=True)
-                 generation_successful = False
-                 # Якщо була помилка, НЕ додаємо цей крок до історії, щоб уникнути поширення помилки? Або додаємо з позначкою?
-                 # Поки що просто пропускаємо додавання до історії при помилці.
-
-            # time.sleep(2) # Пауза
-        logger.info(f"Історію повідомлень {conversation_history}.")
         
-        # 6. Об'єднання файлів
-        if generation_successful:
-             logger.info("Генерацію всіх частин (з контекстом) завершено.")
-             combine_output_files(output_dir, args.output_file, toc_structure, topic)
+        # Визначаємо тему
+        if args.topic:
+            topic = args.topic
         else:
-             logger.warning("Генерація не була повністю успішною. Спробуємо об'єднати те, що є.")
-             combine_output_files(output_dir, args.output_file, toc_structure, topic) # Об'єднуємо те, що вдалося згенерувати
+            topic = config['project_settings'].get('topic', 'Не вказана тема')
 
-        logger.info("Роботу скрипта завершено!")
+        # Add dry-run setting to config
+        if args.dry_run:
+            if 'project_settings' not in config:
+                config['project_settings'] = {}
+            config['project_settings']['dry_run'] = True
+            print("!!! DRY RUN MODE ACTIVATED !!!")
 
-    except (FileNotFoundError, ValueError, ImportError, yaml.YAMLError, ConnectionError) as e:
-        logger.error(f"Критична помилка: {e}")
+        input_toc_file = config['project_settings'].get('input_toc_file', 'input/toc.txt')
+
+        generator = CourseworkGenerator(config)
+        generator.run(topic=topic, input_toc_file=input_toc_file, output_filename=args.output_file)
+
     except Exception as e:
-        logger.error(f"Непередбачена помилка виконання: {e}", exc_info=True)
-
+        logger.error(f"Аварійне завершення: {e}")
 
 if __name__ == "__main__":
     main()

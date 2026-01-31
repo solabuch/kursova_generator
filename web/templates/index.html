@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="uk">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GenCourse — AI Генератор Курсових</title>
+    <meta name="description" content="Автоматична генерація курсових робіт за допомогою штучного інтелекту">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+</head>
+
+<body class="dark-theme">
+    <div class="app-container">
+        <!-- SIDEBAR -->
+        <div class="sidebar">
+            <div class="brand">
+                <div class="logo-icon">AI</div>
+                <h2>GenCourse</h2>
+            </div>
+
+            <nav class="nav-menu">
+                <button class="nav-btn active" onclick="switchTab('dashboard')">
+                    <span class="icon">🏠</span> Головна
+                </button>
+                <button class="nav-btn" onclick="switchTab('console')">
+                    <span class="icon">💻</span> Консоль
+                </button>
+                <button class="nav-btn" onclick="switchTab('settings')">
+                    <span class="icon">⚙️</span> Налаштування
+                </button>
+            </nav>
+
+            <div class="version">v2.1 Web</div>
+        </div>
+
+        <!-- MAIN CONTENT -->
+        <div class="main-content">
+
+            <!-- DASHBOARD TAB -->
+            <div id="tab-dashboard" class="tab-content active">
+                <header class="page-header">
+                    <h1>Вітаємо! Що будемо писати сьогодні?</h1>
+                </header>
+
+                <div class="grid-layout">
+                    <!-- Project Card -->
+                    <div class="card project-card">
+                        <div class="card-header">
+                            <h3>📑 Проєкт</h3>
+                        </div>
+                        <div class="form-group">
+                            <label>ТЕМА КУРСОВОЇ</label>
+                            <input type="text" id="topic-input" placeholder="Введіть тему роботи..." autocomplete="off">
+                        </div>
+
+                        <div class="form-group">
+                            <div class="label-row">
+                                <label>ПЛАН РОБОТИ (ЗМІСТ)</label>
+                                <div class="toc-actions">
+                                    <button class="action-btn small" onclick="TOC.addRoot()">+ Розділ</button>
+                                    <button class="action-btn small" onclick="TOC.importDialog()">📋 Імпорт</button>
+                                </div>
+                            </div>
+
+                            <!-- TOC EDITOR CONTAINER -->
+                            <div id="toc-editor" class="toc-editor">
+                                <!-- Dynamic Items Here -->
+                                <div class="empty-state">📝 Додайте пункти або імпортуйте текст</div>
+                            </div>
+
+                            <p style="margin-top: 12px; font-size: 12px; color: var(--text-secondary);">
+                                💡 Оберіть метод генерації для кожного пункту (колонка праворуч). Перетягуйте для
+                                сортування.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- PROGRESS BAR -->
+                    <div id="progress-container" class="progress-container" style="display:none;">
+                        <div class="progress-header">
+                            <span id="progress-status" class="progress-status">Очікування...</span>
+                            <span id="progress-percent" class="progress-percent">0%</span>
+                        </div>
+                        <div class="progress-track">
+                            <div id="progress-fill" class="progress-fill"></div>
+                        </div>
+                    </div>
+
+                    <!-- Actions Panel -->
+                    <div class="actions-panel">
+                        <button class="btn btn-primary" onclick="startGeneration()">🚀 ПОЧАТИ ГЕНЕРАЦІЮ</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CONSOLE TAB -->
+            <div id="tab-console" class="tab-content">
+                <header class="page-header">
+                    <h1>Логи Генерації</h1>
+                    <div id="status-badge" class="badge">Очікування</div>
+                </header>
+
+                <div class="console-window">
+                    <div id="log-output" class="log-output">
+                        <!-- Logs go here -->
+                        <div class="log-line system">> Система готова...</div>
+                    </div>
+                </div>
+
+                <div class="console-actions">
+                    <button id="btn-open-file" class="btn btn-success" disabled onclick="openResultFile()">📂 Відкрити
+                        Результат</button>
+                </div>
+            </div>
+
+            <!-- SETTINGS TAB -->
+            <div id="tab-settings" class="tab-content">
+                <header class="page-header">
+                    <h1>Налаштування</h1>
+                </header>
+
+                <div class="card settings-card">
+                    <div class="settings-section">
+                        <h4>Провайдер AI</h4>
+                        <select id="provider-select">
+                            <option value="openai">OpenAI</option>
+                            <option value="claude">Claude (Stub)</option>
+                            <option value="gemini">Gemini (Stub)</option>
+                        </select>
+                    </div>
+
+                    <div class="settings-section">
+                        <h4>API Key</h4>
+                        <input type="password" id="api-key-input" placeholder="sk-...">
+                    </div>
+
+                    <div class="settings-section">
+                        <h4>Модель</h4>
+                        <input type="text" id="model-input" placeholder="gpt-4o">
+                    </div>
+
+                    <div class="settings-section">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="dry-run-switch">
+                            <span class="slider"></span>
+                            <span class="label-text">Dry Run (Безкоштовний тест)</span>
+                        </label>
+                    </div>
+
+                    <button class="btn btn-save" onclick="saveConfig()">💾 Зберегти</button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- MODALS -->
+
+    <!-- Import Modal -->
+    <div id="modal-import" class="modal">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeModal('modal-import')">&times;</span>
+            <h3>📋 Імпорт Змісту</h3>
+            <p>Вставте текст змісту нижче. Кожен рядок буде окремим пунктом.</p>
+            <textarea id="import-text-area" placeholder="Вступ...&#10;Розділ 1...&#10;1.1..."></textarea>
+            <div class="modal-buttons">
+                <button class="btn btn-primary" onclick="TOC.applyImport()">Імпортувати</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script -->
+    <script src="/static/js/main.js"></script>
+</body>
+
+</html>
