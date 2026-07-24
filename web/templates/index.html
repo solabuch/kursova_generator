@@ -4,177 +4,211 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GenCourse — AI Генератор Курсових</title>
-    <meta name="description" content="Автоматична генерація курсових робіт за допомогою штучного інтелекту">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <title>GenCourse — AI генератор академічних робіт</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
-        rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
 </head>
 
-<body class="dark-theme">
-    <div class="app-container">
-        <!-- SIDEBAR -->
-        <div class="sidebar">
-            <div class="brand">
-                <div class="logo-icon">AI</div>
-                <h2>GenCourse</h2>
+<body>
+    <!-- анімований фон -->
+    <div class="aurora" aria-hidden="true">
+        <span class="a1"></span>
+        <span class="a2"></span>
+        <span class="a3"></span>
+        <span class="a4"></span>
+    </div>
+    <div class="noise" aria-hidden="true"></div>
+
+    <div class="app">
+
+        <!-- ═══════════ LEFT RAIL ═══════════ -->
+        <aside class="rail">
+            <div class="rail-brand">
+                <div class="rail-logo"><span>GC</span></div>
+                <div class="rail-brand-text">
+                    <h1>GenCourse</h1>
+                    <span>AI генератор робіт</span>
+                </div>
             </div>
 
-            <nav class="nav-menu">
-                <button class="nav-btn active" onclick="switchTab('dashboard')">
-                    <span class="icon">🏠</span> Головна
+            <div class="rail-scroll">
+
+                <section class="rail-group" style="--d:0">
+                    <label class="rail-label">Тип роботи</label>
+                    <div class="seg seg-grid" id="worktype-seg">
+                        <button data-value="coursework" class="active">Курсова</button>
+                        <button data-value="diploma">Дипломна</button>
+                        <button data-value="report">Звіт</button>
+                        <button data-value="essay">Реферат</button>
+                    </div>
+                </section>
+
+                <section class="rail-group" style="--d:1">
+                    <label class="rail-label">Обсяг підрозділу</label>
+                    <div class="seg" id="volume-seg">
+                        <button data-value="short">S</button>
+                        <button data-value="standard" class="active">M</button>
+                        <button data-value="detailed">L</button>
+                    </div>
+                    <div class="rail-hint" id="volume-hint">≈1000 слів на підрозділ</div>
+                </section>
+
+                <section class="rail-group" style="--d:2">
+                    <label class="rail-label">Модель</label>
+                    <div class="preset-stack" id="preset-stack">
+                        <button data-preset="economy">
+                            <span class="p-ico">💰</span>
+                            <span class="p-text"><b>Економно</b><em>gpt-4o-mini · ~$0.01</em></span>
+                            <span class="p-check"></span>
+                        </button>
+                        <button data-preset="standard" class="active">
+                            <span class="p-ico">⚖️</span>
+                            <span class="p-text"><b>Стандарт</b><em>gemini-2.5-flash · ~$0.03</em></span>
+                            <span class="p-check"></span>
+                        </button>
+                        <button data-preset="quality">
+                            <span class="p-ico">🎯</span>
+                            <span class="p-text"><b>Якість</b><em>gpt-4o · ~$0.10</em></span>
+                            <span class="p-check"></span>
+                        </button>
+                    </div>
+                </section>
+
+                <section class="rail-group" style="--d:3">
+                    <label class="rail-label">Методичка <span class="opt">опційно</span></label>
+                    <div class="dropzone" id="dropzone">
+                        <input type="file" id="methodology-file" accept=".txt,.md,.docx,.pdf" hidden>
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        <span id="dropzone-text">Перетягни файл або <u>обери</u></span>
+                    </div>
+                    <textarea id="methodology-text" rows="3" placeholder="…або встав текст вимог сюди"></textarea>
+                </section>
+
+            </div>
+
+            <div class="rail-footer">
+                <div class="estimate">
+                    <span class="est-main" id="est-cost">—</span>
+                    <span class="est-sub" id="est-detail"></span>
+                </div>
+                <button class="btn-generate" id="btn-generate">
+                    <span class="bg-inner">
+                        <svg class="bg-bolt" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 3 14h7l-1 8 11-13h-7l1-7z"/></svg>
+                        <span class="bg-label">Згенерувати</span>
+                        <span class="bg-kbd">Ctrl ↵</span>
+                    </span>
                 </button>
-                <button class="nav-btn" onclick="switchTab('console')">
-                    <span class="icon">💻</span> Консоль
-                </button>
-                <button class="nav-btn" onclick="switchTab('settings')">
-                    <span class="icon">⚙️</span> Налаштування
-                </button>
-            </nav>
+                <div class="rail-actions">
+                    <button class="btn-ghost" id="btn-download" disabled>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        DOCX
+                    </button>
+                    <button class="btn-ghost" id="btn-folder" title="Відкрити папку output">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    </button>
+                </div>
+            </div>
+        </aside>
 
-            <div class="version">v2.1 Web</div>
-        </div>
+        <!-- ═══════════ CENTER ═══════════ -->
+        <main class="canvas">
+            <div class="top-progress"><div id="top-progress-fill"></div></div>
 
-        <!-- MAIN CONTENT -->
-        <div class="main-content">
+            <div class="canvas-scroll">
+                <div class="doc">
 
-            <!-- DASHBOARD TAB -->
-            <div id="tab-dashboard" class="tab-content active">
-                <header class="page-header">
-                    <h1>Вітаємо! Що будемо писати сьогодні?</h1>
-                </header>
+                    <input class="doc-title" id="topic-input" placeholder="Тема роботи…" autocomplete="off" spellcheck="false">
 
-                <div class="grid-layout">
-                    <!-- Project Card -->
-                    <div class="card project-card">
-                        <div class="card-header">
-                            <h3>📑 Проєкт</h3>
-                        </div>
-                        <div class="form-group">
-                            <label>ТЕМА КУРСОВОЇ</label>
-                            <input type="text" id="topic-input" placeholder="Введіть тему роботи..." autocomplete="off">
-                        </div>
-
-                        <div class="form-group">
-                            <div class="label-row">
-                                <label>ПЛАН РОБОТИ (ЗМІСТ)</label>
-                                <div class="toc-actions">
-                                    <button class="action-btn small" onclick="TOC.addRoot()">+ Розділ</button>
-                                    <button class="action-btn small" onclick="TOC.importDialog()">📋 Імпорт</button>
-                                </div>
+                    <!-- Рецензія -->
+                    <div class="review-banner" id="review-banner" hidden>
+                        <div class="rb-head">
+                            <div class="rb-score" id="rb-score">
+                                <svg viewBox="0 0 48 48">
+                                    <circle class="ring-bg" cx="24" cy="24" r="20"/>
+                                    <circle class="ring-val" id="rb-ring" cx="24" cy="24" r="20"/>
+                                </svg>
+                                <span id="rb-score-num">—</span>
                             </div>
-
-                            <!-- TOC EDITOR CONTAINER -->
-                            <div id="toc-editor" class="toc-editor">
-                                <!-- Dynamic Items Here -->
-                                <div class="empty-state">📝 Додайте пункти або імпортуйте текст</div>
+                            <div class="rb-meta">
+                                <div class="rb-title">Рецензія ШІ</div>
+                                <div class="rb-verdict" id="rb-verdict"></div>
                             </div>
-
-                            <p style="margin-top: 12px; font-size: 12px; color: var(--text-secondary);">
-                                💡 Оберіть метод генерації для кожного пункту (колонка праворуч). Перетягуйте для
-                                сортування.
-                            </p>
+                            <button class="rb-close" id="rb-close" title="Сховати">×</button>
                         </div>
+                        <div class="rb-body" id="rb-body"></div>
                     </div>
 
-                    <!-- PROGRESS BAR -->
-                    <div id="progress-container" class="progress-container" style="display:none;">
-                        <div class="progress-header">
-                            <span id="progress-status" class="progress-status">Очікування...</span>
-                            <span id="progress-percent" class="progress-percent">0%</span>
-                        </div>
-                        <div class="progress-track">
-                            <div id="progress-fill" class="progress-fill"></div>
-                        </div>
+                    <div class="doc-toolbar">
+                        <button class="tool-btn" id="btn-template">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+                            Шаблони
+                        </button>
+                        <button class="tool-btn" id="btn-import">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                            Імпорт
+                        </button>
+                        <span class="toolbar-spacer"></span>
+                        <span class="status-pill" id="status-pill"><i></i>готово</span>
                     </div>
 
-                    <!-- Actions Panel -->
-                    <div class="actions-panel">
-                        <button class="btn btn-primary" onclick="startGeneration()">🚀 ПОЧАТИ ГЕНЕРАЦІЮ</button>
+                    <div class="sections" id="sections"></div>
+
+                    <div class="doc-add">
+                        <button class="add-btn" id="btn-add-chapter">+ Розділ</button>
+                        <button class="add-btn" id="btn-add-sub">+ Підрозділ</button>
                     </div>
+
                 </div>
             </div>
 
-            <!-- CONSOLE TAB -->
-            <div id="tab-console" class="tab-content">
-                <header class="page-header">
-                    <h1>Логи Генерації</h1>
-                    <div id="status-badge" class="badge">Очікування</div>
-                </header>
-
-                <div class="console-window">
-                    <div id="log-output" class="log-output">
-                        <!-- Logs go here -->
-                        <div class="log-line system">> Система готова...</div>
+            <!-- Консоль-тікер -->
+            <div class="ticker" id="ticker">
+                <div class="ticker-bar" id="ticker-bar">
+                    <div class="stage-track" id="stage-track">
+                        <div class="stage-line"><div id="stage-line-fill"></div></div>
+                        <span class="sdot" data-stage="plan" title="План"></span>
+                        <span class="sdot" data-stage="translate" title="EN-переклад"></span>
+                        <span class="sdot" data-stage="blueprint" title="Blueprint"></span>
+                        <span class="sdot" data-stage="research" title="Джерела"></span>
+                        <span class="sdot" data-stage="generate" title="Генерація"></span>
+                        <span class="sdot" data-stage="review" title="Рецензія"></span>
+                        <span class="sdot" data-stage="save" title="Збереження"></span>
                     </div>
+                    <span class="ticker-line" id="ticker-line">Система готова</span>
+                    <button class="ticker-toggle" id="ticker-toggle" title="Логи">▴</button>
                 </div>
-
-                <div class="console-actions">
-                    <button id="btn-open-file" class="btn btn-success" disabled onclick="openResultFile()">📂 Відкрити
-                        Результат</button>
-                </div>
-            </div>
-
-            <!-- SETTINGS TAB -->
-            <div id="tab-settings" class="tab-content">
-                <header class="page-header">
-                    <h1>Налаштування</h1>
-                </header>
-
-                <div class="card settings-card">
-                    <div class="settings-section">
-                        <h4>Провайдер AI</h4>
-                        <select id="provider-select">
-                            <option value="openai">OpenAI</option>
-                            <option value="claude">Claude (Stub)</option>
-                            <option value="gemini">Gemini (Stub)</option>
-                        </select>
-                    </div>
-
-                    <div class="settings-section">
-                        <h4>API Key</h4>
-                        <input type="password" id="api-key-input" placeholder="sk-...">
-                    </div>
-
-                    <div class="settings-section">
-                        <h4>Модель</h4>
-                        <input type="text" id="model-input" placeholder="gpt-4o">
-                    </div>
-
-                    <div class="settings-section">
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="dry-run-switch">
-                            <span class="slider"></span>
-                            <span class="label-text">Dry Run (Безкоштовний тест)</span>
-                        </label>
-                    </div>
-
-                    <button class="btn btn-save" onclick="saveConfig()">💾 Зберегти</button>
+                <div class="ticker-body" id="ticker-body">
+                    <button class="log-clear" id="log-clear" title="Очистити">🗑</button>
+                    <div class="log-output" id="log-output"></div>
                 </div>
             </div>
-
-        </div>
+        </main>
     </div>
 
     <!-- MODALS -->
+    <div class="modal" id="modal-template">
+        <div class="modal-card">
+            <button class="modal-x" data-close>×</button>
+            <h3>Шаблони змісту</h3>
+            <p>Поточний зміст буде замінено</p>
+            <div class="template-list" id="template-list"></div>
+        </div>
+    </div>
 
-    <!-- Import Modal -->
-    <div id="modal-import" class="modal">
-        <div class="modal-content">
-            <span class="close-modal" onclick="closeModal('modal-import')">&times;</span>
-            <h3>📋 Імпорт Змісту</h3>
-            <p>Вставте текст змісту нижче. Кожен рядок буде окремим пунктом.</p>
-            <textarea id="import-text-area" placeholder="Вступ...&#10;Розділ 1...&#10;1.1..."></textarea>
-            <div class="modal-buttons">
-                <button class="btn btn-primary" onclick="TOC.applyImport()">Імпортувати</button>
+    <div class="modal" id="modal-import">
+        <div class="modal-card">
+            <button class="modal-x" data-close>×</button>
+            <h3>Імпорт змісту</h3>
+            <p>Встав текст. Підрозділи — з відступом у 4 пробіли</p>
+            <textarea id="import-text" rows="10" placeholder="ВСТУП&#10;РОЗДІЛ 1. Назва&#10;    1.1 Підрозділ&#10;    1.2 Підрозділ&#10;ВИСНОВКИ&#10;СПИСОК ВИКОРИСТАНИХ ДЖЕРЕЛ"></textarea>
+            <div class="modal-actions">
+                <button class="btn-modal-primary" id="btn-apply-import">Імпортувати</button>
             </div>
         </div>
     </div>
 
-    <!-- Script -->
     <script src="/static/js/main.js"></script>
 </body>
 

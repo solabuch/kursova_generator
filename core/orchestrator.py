@@ -1,238 +1,631 @@
 # core/orchestrator.py
-import logging
+"""Асинхронний pipeline: план → розподіл тем → паралельний research → паралельна генерація body → intro/conclusions."""
+import asyncio
 import json
-from typing import List, Dict, Any
-from core.context_manager import ContextManager
-from core.researcher import Researcher
+import logging
+import re
+
+import httpx
+
 from ai_providers.base_provider import BaseAIProvider
-from core.file_handler import save_content
+from core.models import (
+    ContentBlueprint,
+    GeneratedSection,
+    Plan,
+    PlannedSection,
+    ReviewIssue,
+    SectionType,
+    Source,
+    WorkReview,
+)
+from core.prompts import (
+    BLUEPRINT_BUILDER,
+    DISTRIBUTOR,
+    PLANNER,
+    REGISTRY,
+    REVIEWER,
+    TRANSLATE_QUERIES,
+    VOLUME_SPECS,
+)
+from core.research.aggregator import ResearchAggregator
 
 logger = logging.getLogger(__name__)
 
+BIBLIOGRAPHY_TITLE_HINTS = (
+    "список використаних джерел",
+    "список літератури",
+    "література",
+    "references",
+    "bibliography",
+)
+
+CYRILLIC_RE = re.compile(r"[А-Яа-яЇїІіЄєҐґ]")
+
+
 class Orchestrator:
-    """
-    Керує процесом планування та генерації курсової роботи.
-    - Аналізує зміст (Planner).
-    - Визначає тип розділу (Theory vs Practice).
-    - Запускає дослідження (Researcher).
-    - Генерує контент з відповідним агентом.
-    """
-    def __init__(self, ai_provider: BaseAIProvider, config: Dict[str, Any]):
-        self.ai = ai_provider
-        self.config = config
-        self.context_manager = ContextManager(model_name=config['providers'][config['active_provider']]['model'])
-        self.researcher = Researcher()
-        
-        # Завантаження промптів
-        self.prompts = {
-            'planner': self._load_prompt('prompts/planner_prompt.txt'),
-            'theory': self._load_prompt('prompts/theory_agent.txt'),
-            'practice': self._load_prompt('prompts/practical_agent.txt')
-        }
+    def __init__(
+        self,
+        ai: BaseAIProvider,
+        research: ResearchAggregator,
+        *,
+        ai_helper: BaseAIProvider | None = None,
+        concurrency: int = 5,
+        sources_per_section: int = 8,
+    ):
+        self.ai = ai                                       # body theory/practical (preset)
+        self.ai_helper = ai_helper or ai                   # planner/blueprint/translate/intro/conclusion
+        self.research = research
+        self.concurrency = concurrency
+        self.sources_per_section = sources_per_section
+        self._sem = asyncio.Semaphore(concurrency)
+        self.volume: str = "standard"  # перезаписується у run()/regenerate_section()
 
-    def _load_prompt(self, path: str) -> str:
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            logger.warning(f"Промпт {path} не знайдено, використовується стандартний.")
-            return ""
+    @property
+    def volume_spec(self) -> str:
+        return VOLUME_SPECS.get(self.volume, VOLUME_SPECS["standard"])
 
-    def create_plan(self, toc: List[Dict], overrides: Dict[str, str] = None) -> List[Dict]:
-        """
-        Аналізує зміст і створює план генерації для кожного розділу.
-        :param overrides: Словник {full_title: method_type} для примусового вибору методу.
-        """
-        logger.info("Створення плану генерації...")
-        if overrides is None:
-            overrides = {}
-        
-        # Check for dry run
-        if self.config.get('project_settings', {}).get('dry_run', False):
-            logger.info("Dry Run: Skipping plan generation by AI, returning default plan.")
-            for item in toc:
-                item['type'] = 'theoretical'
-                item['entities'] = []
-                item['research_needed'] = False
-                item['guidance'] = "Dry Run Guidance"
-            return toc
+    # =========================== PLAN ===========================
 
-        toc_text = "\n".join([f"{item['number']} {item['title']}" for item in toc])
-        
-        prompt = self.prompts['planner'].format(toc=toc_text, topic=self.config['project_settings']['topic'])
-        
-        try:
-            response = self.ai.generate_text(prompt, history=[])
-            
-            # Robust JSON extraction
-            import re
-            json_match = re.search(r'\[.*\]', response, re.DOTALL)
-            
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                json_str = response
-            
-            # Clean common markdown/formatting artifacts
-            json_str = json_str.replace("```json", "").replace("```", "").strip()
-            
-            # Attempt to fix trailing commas or simple syntax errors if needed (simplified here)
-            try:
-                plan = json.loads(json_str)
-            except json.JSONDecodeError:
-                # Fallback: try to repair naive single quotes which is common with weak models
-                try:
-                    corrected_json = json_str.replace("'", '"')
-                    plan = json.loads(corrected_json)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON even after cleanup: {e}")
-                    raise ValueError("AI response did not contain valid JSON.")
+    async def plan(
+        self,
+        toc: list[dict],
+        *,
+        topic: str,
+        work_type: str,
+        methodology: str,
+    ) -> Plan:
+        meth_len = len(methodology.strip()) if methodology else 0
+        if meth_len:
+            logger.info(f"ПЛАН: {len(toc)} секцій, тема={topic!r}, тип={work_type}, "
+                        f"методичка={meth_len} символів ✓")
+        else:
+            logger.info(f"ПЛАН: {len(toc)} секцій, тема={topic!r}, тип={work_type}, "
+                        f"методичка ВІДСУТНЯ")
 
-            # Apply AI plan first
-            enrichments = {item.get('number', str(idx)): item for idx, item in enumerate(plan)}
-            
-            final_plan = []
-            for item in toc:
-                # Try to match by number, otherwise fallback
-                enrichment = enrichments.get(item['number'], {})
-                
-                # Default from AI or fallback
-                item['type'] = enrichment.get('type', 'theoretical')
-                item['entities'] = enrichment.get('entities', [])
-                item['research_needed'] = enrichment.get('research_needed', False)
-                item['guidance'] = enrichment.get('guidance', '')
-                
-                # Apply Manual Overrides
-                # Ми перевіряємо по full_title, бо це унікальний ідентифікатор в межах GUI
-                if item['full_title'] in overrides:
-                    manual_type = overrides[item['full_title']]
-                    if manual_type != 'auto':
-                         item['type'] = manual_type
-                         logger.info(f"Manual override for '{item['full_title']}': {manual_type}")
+        toc_text = "\n".join(f"{i['number']} {i['title']}" for i in toc)
+        prompt = PLANNER.render(
+            toc=toc_text,
+            topic=topic,
+            work_type=work_type,
+            methodology=methodology,
+        )
 
-                final_plan.append(item)
-                
-            logger.info("План успішно створено.")
-            return final_plan
+        raw = await self.ai_helper.generate(
+            prompt,
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+        plan_items = self._parse_plan_json(raw)
+        if not plan_items:
+            logger.warning(f"Planner повернув порожній JSON. RAW: {raw[:500]}")
+        by_number = {item.get("number", ""): item for item in plan_items}
 
-        except Exception as e:
-            logger.error(f"Помилка при створенні плану: {e}. Використовуємо стандартний план (все теорія).")
-            # Fallback
-            final_plan = []
-            for item in toc:
-                item['type'] = 'theoretical'
-                item['entities'] = []
-                item['research_needed'] = False
-                
-                # Apply Manual Overrides in fallback too
-                if item['full_title'] in overrides:
-                     manual_type = overrides[item['full_title']]
-                     if manual_type != 'auto':
-                         item['type'] = manual_type
-                
-                final_plan.append(item)
-            return final_plan
-
-
-    def execute_plan(self, plan: List[Dict], output_dir: str):
-        """
-        Виконує генерацію згідно з планом.
-        """
-        total = len(plan)
-        logger.info(f"Початок виконання плану... ({total} розділів)")
-        
-        for idx, item in enumerate(plan, 1):
-            # Прогрес з лічильником
-            logger.info(f"[{idx}/{total}] Обробка: {item['full_title']} [{item.get('type', 'theo')}]")
-            
-            # 1. Дослідження (якщо потрібно або практичний розділ)
-            research_summary = ""
-            topic = self.config['project_settings']['topic']
-            
-            # Для практичних розділів завжди шукаємо дані
-            if item.get('type') == 'practical' or (item.get('research_needed') and item.get('entities')):
-                entities = item.get('entities', [])
-                
-                if entities:
-                    logger.info(f"Пошук інформації для: {entities}")
-                    for entity in entities:
-                        info = self.researcher.search_entity(entity, context=topic)
-                        if "Пошук не дав результатів" not in info:
-                            research_summary += f"\nДані про '{entity}':\n{info}\n"
-                
-                # Якщо немає конкретних даних - шукаємо загальну статистику
-                if not research_summary.strip() or "Пошук не дав результатів" in research_summary:
-                    logger.info("Збираємо загальну статистику по темі...")
-                    stats = self.researcher.get_regional_stats(topic, "Україна")
-                    # Подаємо дані як реальні, щоб AI використав їх впевнено
-                    research_summary = f"""Актуальні дані для аналізу:
-{stats}
-
-Використовуй ці дані в тексті як реальні показники. Формуй таблиці та висновки на їх основі."""
-
-            # 2. Підготовка промпту для агента
-            agent_type = item.get('type', 'theoretical')
-            prompt_template = self.prompts.get('practice' if agent_type == 'practical' else 'theory')
-            
-            # Визначаємо, чи це вступ/висновки
-            is_intro_or_conc = any(x in item['full_title'].lower() for x in ['вступ', 'висновки', 'резюме'])
-            
-            if is_intro_or_conc:
-                citation_instr = "У цьому розділі ЗАБОРОНЕНО використовувати посилання на джерела. Не додавай жодних [N] цитат."
-                source_instr = ""
-            else:
-                citation_instr = """ПРАВИЛА ПОСИЛАНЬ НА ДЖЕРЕЛА (ОБОВ'ЯЗКОВО ДОТРИМУЙСЯ):
-1. Кожен рядок тексту = 1 абзац
-2. ПЕРШЕ посилання ставиться НЕ РАНІШЕ 3-го абзацу (тобто абзаци 1 і 2 без посилань)
-3. Далі посилання через кожні 2-4 абзаци (випадково обирай інтервал)
-4. Номери посилань в тексті НЕ мають йти послідовно (можна [3], потім [1], потім [5])
-5. НЕ ставити посилання в кожному абзаці - це виглядає неприродно
-6. Використовуй 4-7 різних джерел для розділу"""
-                source_instr = """В кінці відповіді надай список використаних джерел у блоці:
-[[SOURCE_LIST]]
-1. Перше джерело (повний бібліографічний опис)
-2. Друге джерело
-...
-[[/SOURCE_LIST]]
-
-Джерела мають бути реалістичними (українські автори, видавництва, роки 2018-2024)."""
-
-            
-            # Контекст з попередніх розділів
-            context_history = self.context_manager.get_context()
-            
-            # Формування повного промпту
-            section_prompt = prompt_template.format(
-                topic=topic,
-                section_title=item['full_title'],
-                guidance=item.get('guidance', ''),
-                research_data=research_summary,
-                methodology=self.config['project_settings']['methodology_summary'],
-                citation_instruction=citation_instr,
-                source_list_instruction=source_instr
+        sections: list[PlannedSection] = []
+        for it in toc:
+            enr = by_number.get(it["number"], {})
+            stype = self._classify(it, enr)
+            sections.append(
+                PlannedSection(
+                    number=it["number"],
+                    title=it["title"],
+                    full_title=it["full_title"],
+                    level=it.get("level", 0),
+                    type=stype,
+                    guidance=enr.get("guidance", ""),
+                    entities=enr.get("entities") or [],
+                    research_query=enr.get("research_query") or it["title"],
+                )
             )
-            
-            # 3. Генерація
-            try:
-                if self.config.get('project_settings', {}).get('dry_run', False):
-                    content = f"[DRY RUN MODE]\n\nGenerated content for section: {item['full_title']}\n\nKey Entities identified: {item.get('entities')}\n\nResearch Summary:\n{research_summary}"
-                    if not is_intro_or_conc:
-                        content += "\n\n[[SOURCE_LIST]]\n1. Test Source A\n2. Test Source B\n[[/SOURCE_LIST]]"
-                    logger.info(f"[{idx}/{total}] Dry run generation completed")
-                else:
-                    content = self.ai.generate_text(section_prompt, history=context_history)
-                    logger.info(f"[{idx}/{total}] Генерацію завершено")
-                
-                # 4. Збереження та оновлення контексту
-                save_content(output_dir, item, content)
-                
-                # Додаємо в історію контексту
-                self.context_manager.add_message("user", f"Write section: {item['full_title']}")
-                self.context_manager.add_message("assistant", content)
-                
-            except Exception as e:
-                logger.error(f"[{idx}/{total}] ПОМИЛКА генерації для {item['full_title']}: {e}")
-                # Зберігаємо помилку замість втрати розділу
-                error_content = f"[ПОМИЛКА ГЕНЕРАЦІЇ]\n\nРозділ: {item['full_title']}\nПомилка: {str(e)}\n\nБудь ласка, перегенеруйте цей розділ вручну."
-                save_content(output_dir, item, error_content)
 
+        # Skip-логіка: батьки з нащадками + бібліографія
+        self._mark_skip_generation(sections)
+
+        logger.info(
+            "План готовий: "
+            + ", ".join(
+                f"{s.number}[{s.type.value[:4]}{'⊘' if s.skip_generation else ''}]"
+                for s in sections
+            )
+        )
+
+        # F3: переклад research_query UA → EN
+        await self._translate_queries_to_english(sections)
+
+        return Plan(
+            topic=topic,
+            work_type=work_type,
+            sections=sections,
+            methodology=methodology,
+        )
+
+    @staticmethod
+    def _parse_plan_json(raw: str) -> list[dict]:
+        cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            m = re.search(r"\{.*\}|\[.*\]", cleaned, re.DOTALL)
+            if not m:
+                logger.error(f"Planner повернув не-JSON: {raw[:200]}")
+                return []
+            data = json.loads(m.group(0))
+        if isinstance(data, dict):
+            return data.get("sections") or data.get("plan") or []
+        if isinstance(data, list):
+            return data
+        return []
+
+    @staticmethod
+    def _classify(it: dict, enr: dict) -> SectionType:
+        # Ручний override з web UI має найвищий пріоритет
+        override = it.get("_type_override")
+        if override:
+            try:
+                return SectionType(override)
+            except ValueError:
+                logger.warning(f"Невалідний _type_override={override!r} — fallback на auto")
+
+        title = it["full_title"].lower()
+        if any(h in title for h in BIBLIOGRAPHY_TITLE_HINTS):
+            return SectionType.BIBLIOGRAPHY
+        if "вступ" in title or "резюме" in title:
+            return SectionType.INTRO
+        if "висновк" in title:
+            return SectionType.CONCLUSION
+        return (
+            SectionType.PRACTICAL
+            if enr.get("type") == "practical"
+            else SectionType.THEORETICAL
+        )
+
+    @staticmethod
+    def _mark_skip_generation(sections: list[PlannedSection]) -> None:
+        """level=0 з нащадками → skip. BIBLIOGRAPHY → skip."""
+        for i, sec in enumerate(sections):
+            if sec.type == SectionType.BIBLIOGRAPHY:
+                sec.skip_generation = True
+                continue
+            if sec.level == 0:
+                # Чи є дитина (level>0) одразу після, до наступної level=0?
+                for nxt in sections[i + 1 :]:
+                    if nxt.level <= 0:
+                        break
+                    if nxt.level > 0:
+                        sec.skip_generation = True
+                        break
+
+    async def _translate_queries_to_english(
+        self,
+        sections: list[PlannedSection],
+    ) -> None:
+        """Якщо research_query містить кирилицю — батч-переклад на EN одним LLM-call."""
+        needs: list[PlannedSection] = [
+            s for s in sections
+            if not s.skip_generation
+            and s.research_query
+            and CYRILLIC_RE.search(s.research_query)
+        ]
+        if not needs:
+            return
+
+        prompt = TRANSLATE_QUERIES.render(queries=[s.research_query for s in needs])
+        try:
+            raw = await self.ai_helper.generate(
+                prompt,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            data = json.loads(raw)
+            translated = data.get("queries") or []
+        except Exception as e:
+            logger.warning(f"Не вдалося перекласти queries: {e}")
+            return
+
+        for sec, eng in zip(needs, translated):
+            if eng and isinstance(eng, str):
+                logger.info(f"Translate [{sec.number}]: {sec.research_query!r} → {eng!r}")
+                sec.research_query = eng
+
+    # ========================= DISTRIBUTE TOPICS =========================
+
+    async def build_blueprints(self, plan: Plan) -> None:
+        """Pre-generation: LLM створює глибокий content blueprint для кожної body-секції.
+        Це замінює простий cover/avoid — кожна секція отримує main_thesis, key_subtopics,
+        must_define, data_to_invent (вигадані але реалістичні факти), depth_focus."""
+        targets = [s for s in plan.sections if self._needs_content(s)
+                   and s.type in (SectionType.THEORETICAL, SectionType.PRACTICAL)]
+        if not targets:
+            return
+
+        toc_text = "\n".join(f"{s.number} {s.full_title}" for s in targets)
+        prompt = BLUEPRINT_BUILDER.render(
+            topic=plan.topic,
+            work_type=plan.work_type,
+            methodology=plan.methodology,
+            toc=toc_text,
+        )
+
+        try:
+            raw = await self.ai_helper.generate(
+                prompt,
+                response_format={"type": "json_object"},
+                temperature=0.4,
+                max_tokens=8000,
+            )
+            data = json.loads(raw)
+        except Exception as e:
+            logger.warning(f"Blueprint generation failed: {e}")
+            return
+
+        blueprints = data.get("blueprints") or data.get("distribution") or {}
+        applied = 0
+        for sec in targets:
+            entry = blueprints.get(sec.number)
+            if not entry:
+                continue
+            try:
+                # Підтримка legacy формату {cover, avoid}
+                if "cover" in entry and "main_thesis" not in entry:
+                    sec.cover_topics = list(entry.get("cover") or [])
+                    sec.avoid_topics = list(entry.get("avoid") or [])
+                else:
+                    sec.blueprint = ContentBlueprint(
+                        main_thesis=str(entry.get("main_thesis", "")),
+                        key_subtopics=list(entry.get("key_subtopics") or []),
+                        must_define=list(entry.get("must_define") or []),
+                        data_to_invent=list(entry.get("data_to_invent") or []),
+                        depth_focus=str(entry.get("depth_focus", "")),
+                        avoid_overlap_with=[str(x) for x in (entry.get("avoid_overlap_with") or [])],
+                    )
+                applied += 1
+            except Exception as e:
+                logger.warning(f"Blueprint для {sec.number} некоректний: {e}")
+
+        logger.info(f"BLUEPRINTS: побудовано для {applied}/{len(targets)} секцій")
+
+    # Backward-compat alias
+    distribute_topics = build_blueprints
+
+    @staticmethod
+    def _needs_content(s: PlannedSection) -> bool:
+        """Чи треба генерувати LLM-контент для секції."""
+        return (
+            not s.skip_generation
+            and s.type in (
+                SectionType.THEORETICAL,
+                SectionType.PRACTICAL,
+                SectionType.INTRO,
+                SectionType.CONCLUSION,
+            )
+        )
+
+    # =========================== RESEARCH ===========================
+
+    async def gather_research(
+        self,
+        plan: Plan,
+        client: httpx.AsyncClient,
+    ) -> dict[str, list[Source]]:
+        targets = [
+            s for s in plan.sections
+            if not s.skip_generation
+            and s.type in (SectionType.THEORETICAL, SectionType.PRACTICAL)
+        ]
+        logger.info(f"RESEARCH: {len(targets)} паралельних запитів")
+
+        async def _one(sec: PlannedSection) -> tuple[str, list[Source]]:
+            query = sec.research_query or sec.title
+            sources = await self.research.search(query, client)
+            return sec.number, sources[: self.sources_per_section]
+
+        results = await asyncio.gather(*(_one(s) for s in targets))
+        pool = dict(results)
+        total = sum(len(v) for v in pool.values())
+        logger.info(f"RESEARCH: зібрано {total} джерел для {len(pool)} секцій")
+        return pool
+
+    # =========================== GENERATE ===========================
+
+    async def generate(
+        self,
+        plan: Plan,
+        research_pool: dict[str, list[Source]],
+    ) -> list[GeneratedSection]:
+        body = [
+            s for s in plan.sections
+            if not s.skip_generation
+            and s.type in (SectionType.THEORETICAL, SectionType.PRACTICAL)
+        ]
+        logger.info(
+            f"GENERATE body: {len(body)} секцій паралельно (concurrency={self.concurrency})"
+        )
+
+        body_results: list[GeneratedSection] = await asyncio.gather(
+            *[
+                self._gen_section(
+                    sec,
+                    plan,
+                    sources=research_pool.get(sec.number, []),
+                    body_context="",
+                )
+                for sec in body
+            ]
+        )
+
+        # Контекст для вступу/висновків — abstracts у порядку плану
+        order = {s.number: i for i, s in enumerate(plan.sections)}
+        body_results.sort(key=lambda g: order[g.number])
+        body_context = "\n\n".join(
+            f"{g.full_title}: {g.abstract}" for g in body_results
+        )
+
+        frame = [
+            s for s in plan.sections
+            if not s.skip_generation
+            and s.type in (SectionType.INTRO, SectionType.CONCLUSION)
+        ]
+        frame_results: list[GeneratedSection] = []
+        for sec in frame:  # sequential — мало й залежать від body
+            frame_results.append(
+                await self._gen_section(sec, plan, sources=[], body_context=body_context)
+            )
+
+        # Skip-секції — заглушки тільки з заголовком, без content
+        skipped_results: list[GeneratedSection] = [
+            GeneratedSection(
+                number=sec.number,
+                full_title=sec.full_title,
+                level=sec.level,
+                type=sec.type,
+                content="",
+                sources=[],
+                used_source_ids=[],
+                abstract="",
+            )
+            for sec in plan.sections if sec.skip_generation
+        ]
+
+        # Строге відновлення порядку плану
+        plan_index = {s.number: i for i, s in enumerate(plan.sections)}
+        all_results = body_results + frame_results + skipped_results
+        all_results.sort(key=lambda g: plan_index.get(g.number, 10**9))
+
+        missing = [
+            s.number for s in plan.sections
+            if s.number not in {g.number for g in all_results}
+        ]
+        if missing:
+            logger.warning(f"Не згенеровано секцій: {missing}")
+
+        return all_results
+
+    async def _gen_section(
+        self,
+        sec: PlannedSection,
+        plan: Plan,
+        *,
+        sources: list[Source],
+        body_context: str,
+    ) -> GeneratedSection:
+        template = REGISTRY[sec.type.value]
+
+        prompt = template.render(
+            topic=plan.topic,
+            work_type=plan.work_type,
+            section=sec,
+            sources=sources,
+            methodology=plan.methodology,
+            body_context=body_context,
+            volume_spec=self.volume_spec,
+        )
+
+        # Body theory/practical → main модель (preset). Intro/Conclusion → helper.
+        provider = self.ai if sec.type in (SectionType.THEORETICAL, SectionType.PRACTICAL) else self.ai_helper
+        async with self._sem:
+            logger.info(f"→ GEN [{sec.type.value}] {sec.full_title} | {provider.__class__.__name__}")
+            try:
+                content = await provider.generate(prompt, temperature=0.7)
+            except Exception as e:
+                logger.error(f"✗ GEN FAIL [{sec.full_title}]: {e}")
+                content = (
+                    f"[ПОМИЛКА ГЕНЕРАЦІЇ]\nРозділ: {sec.full_title}\nПричина: {e}"
+                )
+
+        content = self._strip_duplicate_heading(content, sec)
+        abstract = self._extract_abstract(content)
+        used_ids = self._detect_used_sources(content, sources)
+
+        logger.info(
+            f"✓ GEN [{sec.full_title}] {len(content)} chars, "
+            f"цитат={len(used_ids)}/{len(sources)}"
+        )
+        return GeneratedSection(
+            number=sec.number,
+            full_title=sec.full_title,
+            level=sec.level,
+            type=sec.type,
+            content=content,
+            sources=sources,
+            used_source_ids=used_ids,
+            abstract=abstract,
+        )
+
+    # =========================== RUN ===========================
+
+    async def run(
+        self,
+        toc: list[dict],
+        *,
+        topic: str,
+        work_type: str = "coursework",
+        methodology: str = "",
+        volume: str = "standard",
+        review: bool = True,
+    ) -> tuple[Plan, list[GeneratedSection], dict[str, Source], dict[str, list[Source]], "WorkReview | None"]:
+        """Повний pipeline. Повертає (plan, sections, bibliography, research_pool, review)."""
+        self.volume = volume
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "kursova-generator/2.0"}
+        ) as client:
+            plan = await self.plan(
+                toc,
+                topic=topic,
+                work_type=work_type,
+                methodology=methodology,
+            )
+            plan.volume = volume
+            await self.build_blueprints(plan)
+            research_pool = await self.gather_research(plan, client)
+            sections = await self.generate(plan, research_pool)
+
+        bibliography = self._build_bibliography(sections)
+
+        work_review = None
+        if review:
+            work_review = await self.review_work(plan, sections, bibliography)
+
+        return plan, sections, bibliography, research_pool, work_review
+
+    # =========================== REVIEW ===========================
+
+    async def review_work(
+        self,
+        plan: Plan,
+        sections: list[GeneratedSection],
+        bibliography: dict[str, Source],
+    ) -> "WorkReview | None":
+        """Фінальний LLM-проxід: оцінка цілісності + рекомендації що перегенерувати."""
+        body = [s for s in sections if s.content.strip()
+                and s.type in (SectionType.THEORETICAL, SectionType.PRACTICAL,
+                               SectionType.INTRO, SectionType.CONCLUSION)]
+        if not body:
+            return None
+
+        # Дайджест: заголовок + перші ~500 символів кожної секції
+        digest_parts = []
+        for g in body:
+            snippet = g.content.strip().replace("\n", " ")[:500]
+            digest_parts.append(f"[{g.number}] {g.full_title}\n{snippet}...")
+        digest = "\n\n".join(digest_parts)
+
+        prompt = REVIEWER.render(
+            topic=plan.topic,
+            work_type=plan.work_type,
+            sections_digest=digest,
+            sources_count=len(bibliography),
+        )
+        logger.info("REVIEW: запуск фінальної рецензії...")
+        try:
+            raw = await self.ai_helper.generate(
+                prompt,
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=2000,
+            )
+            data = json.loads(raw)
+            issues = [
+                ReviewIssue(
+                    section=str(it.get("section", "")),
+                    problem=str(it.get("problem", "")),
+                    severity=it.get("severity", "medium")
+                    if it.get("severity") in ("low", "medium", "high") else "medium",
+                )
+                for it in (data.get("issues") or [])
+            ]
+            review = WorkReview(
+                score=float(data.get("score", 0) or 0),
+                verdict=str(data.get("verdict", "")),
+                strengths=[str(x) for x in (data.get("strengths") or [])],
+                issues=issues,
+                regenerate_recommended=[str(x) for x in (data.get("regenerate_recommended") or [])],
+            )
+            logger.info(f"REVIEW: оцінка {review.score}/10, проблем: {len(review.issues)}")
+            return review
+        except Exception as e:
+            logger.warning(f"REVIEW: не вдалося — {e}")
+            return None
+
+    async def regenerate_section(
+        self,
+        plan: Plan,
+        section_number: str,
+        research_pool: dict[str, list[Source]],
+        existing_sections: list[GeneratedSection],
+        *,
+        volume: str | None = None,
+    ) -> GeneratedSection:
+        """Перегенерує одну секцію без перезапуску усього pipeline."""
+        sec = next((s for s in plan.sections if s.number == section_number), None)
+        if not sec:
+            raise ValueError(f"Секція {section_number!r} не знайдена у плані")
+        if sec.skip_generation:
+            raise ValueError(f"Секція {section_number!r} — пропускається (батько з нащадками або BIBLIOGRAPHY)")
+
+        self.volume = volume or plan.volume or "standard"
+
+        # Контекст для intro/conclusion — abstracts інших body-секцій
+        if sec.type in (SectionType.INTRO, SectionType.CONCLUSION):
+            body_context = "\n\n".join(
+                f"{g.full_title}: {g.abstract}"
+                for g in existing_sections
+                if g.type in (SectionType.THEORETICAL, SectionType.PRACTICAL)
+                and g.number != section_number
+            )
+        else:
+            body_context = ""
+
+        sources = research_pool.get(section_number, [])
+        logger.info(f"REGEN [{sec.type.value}] {sec.full_title} (volume={self.volume})")
+        return await self._gen_section(
+            sec, plan, sources=sources, body_context=body_context
+        )
+
+    @staticmethod
+    def _build_bibliography(sections: list[GeneratedSection]) -> dict[str, Source]:
+        """Тільки джерела, що реально процитовані хоча б в одній секції."""
+        used: set[str] = set()
+        for g in sections:
+            used.update(g.used_source_ids)
+
+        bib: dict[str, Source] = {}
+        for g in sections:
+            for s in g.sources:
+                if s.id in used and s.id not in bib:
+                    bib[s.id] = s
+        return bib
+
+    # =========================== helpers ===========================
+
+    @staticmethod
+    def _strip_duplicate_heading(text: str, sec: PlannedSection) -> str:
+        lines = text.split("\n")
+        if not lines:
+            return text
+        first = lines[0].strip().lower()
+        looks_like_heading = (
+            sec.title.lower() in first
+            or re.match(r"^(розділ|\d+\.\d*\s|вступ|висновк)", first)
+        )
+        if looks_like_heading:
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _extract_abstract(content: str, max_chars: int = 400) -> str:
+        para = content.strip().split("\n\n", 1)[0]
+        return para[:max_chars].strip()
+
+    @staticmethod
+    def _detect_used_sources(
+        content: str,
+        sources: list[Source],
+    ) -> list[str]:
+        """Маппінг локальних [N] → Source.id. Невідомі номери ігноруємо."""
+        found: set[int] = {int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", content)}
+        ids: list[str] = []
+        for n in sorted(found):
+            if 1 <= n <= len(sources):
+                ids.append(sources[n - 1].id)
+        return ids
