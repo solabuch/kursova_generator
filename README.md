@@ -191,9 +191,3 @@ python main.py --topic "..." --methodology methodichka.md
 ## Ліцензія
 
 Проєкт створено для навчальних та портфоліо-цілей.
-
----
-
-<p align="center">
-  Зроблено з ❤️ та AI
-</p>
