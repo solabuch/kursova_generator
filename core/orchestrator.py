@@ -231,7 +231,7 @@ class Orchestrator:
     async def build_blueprints(self, plan: Plan) -> None:
         """Pre-generation: LLM створює глибокий content blueprint для кожної body-секції.
         Це замінює простий cover/avoid — кожна секція отримує main_thesis, key_subtopics,
-        must_define, data_to_invent (вигадані але реалістичні факти), depth_focus."""
+        must_define, facts_to_find (що підкріпити джерелами), depth_focus."""
         targets = [s for s in plan.sections if self._needs_content(s)
                    and s.type in (SectionType.THEORETICAL, SectionType.PRACTICAL)]
         if not targets:
@@ -273,7 +273,7 @@ class Orchestrator:
                         main_thesis=str(entry.get("main_thesis", "")),
                         key_subtopics=list(entry.get("key_subtopics") or []),
                         must_define=list(entry.get("must_define") or []),
-                        data_to_invent=list(entry.get("data_to_invent") or []),
+                        facts_to_find=list(entry.get("facts_to_find") or []),
                         depth_focus=str(entry.get("depth_focus", "")),
                         avoid_overlap_with=[str(x) for x in (entry.get("avoid_overlap_with") or [])],
                     )

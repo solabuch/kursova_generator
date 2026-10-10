@@ -49,7 +49,7 @@ class ContentBlueprint(BaseModel):
     outline: list[str] = Field(default_factory=list)         # NEW: 8-15 деталних пунктів-завдань
     key_subtopics: list[str] = Field(default_factory=list)   # legacy
     must_define: list[str] = Field(default_factory=list)     # терміни, що мають отримати визначення
-    data_to_invent: list[str] = Field(default_factory=list)  # конкретика, яку ШІ ВИГАДУЄ
+    facts_to_find: list[str] = Field(default_factory=list)   # що варто знайти в джерелах (без вигаданих значень)
     depth_focus: str = ""                  # на чому копаємо глибше
     avoid_overlap_with: list[str] = Field(default_factory=list)  # номери інших секцій
 
